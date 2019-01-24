@@ -6,6 +6,8 @@ import csv
 import gzip
 import io
 import json
+import os
+import sys
 from itertools import islice
 
 import progressbar
@@ -29,14 +31,19 @@ def _entity_lookup(entity_name):
     return None
 
 
-IMPORT_PARSER.add_argument(
-    "entity", action="store", metavar="ENTITY", type=_entity_lookup,
-    choices=_ENTITIES,
-    help=('The "root"-entity in the file. Valid choices are: %s'
-          % ', '.join(sorted(c.__name__ for c in _ENTITIES))))
+def input_file(file_name):
+    if file_name == "-":
+        return os.fdopen(sys.stdin.fileno(), "rb", 0)
+
+    return open(file_name, "rb")
 
 IMPORT_PARSER.add_argument(
-    "input_file", action="store", type=argparse.FileType(mode="rb"), metavar="INPUT",
+    "entity", action="store", metavar="ENTITY", type=lambda s: str(s).lower(),
+    choices=[c.__name__.lower() for c in _ENTITIES],
+    help='The "root"-entity in the file. Valid choices are: %(choices)s')
+
+IMPORT_PARSER.add_argument(
+    "input_file", action="store", type=input_file, metavar="INPUT",
     help="The file to read system data from.")
 
 DECOMPRESSION_OPTIONS = IMPORT_PARSER.add_argument_group(
@@ -52,10 +59,16 @@ FORMAT_OPTIONS = IMPORT_PARSER.add_argument_group(
     title="input format options")
 FORMAT_OPTIONS.add_argument(
     "--csv", action="store_const", const=csv.DictReader,
-    help="Inputfile is a csv-file.", dest="input_format")
+    help=("Inputfile is a csv-file. (First line is a header with the attribute"
+          " names, then one entity per row)"), dest="input_format")
+FORMAT_OPTIONS.add_argument(
+    "--json", action="store_const", const=json.load,
+    help="Inputfile is a standard json-file. (A list of dicts)",
+    dest="input_format")
 FORMAT_OPTIONS.add_argument(
     "--jsonl", action="store_const", const=lambda fp: map(json.loads, fp),
-    help="Inputfile is a line-delimited json-file.", dest="input_format")
+    help="Inputfile is a line-delimited json-file. (One dict per line)",
+    dest="input_format")
 
 DATABASE_OPTIONS = IMPORT_PARSER.add_argument_group(
     title="database options",
@@ -70,13 +83,13 @@ DATABASE_OPTIONS.add_argument(
     help="The batch size to use for commiting data to database. Default")
 
 
-def chunked(iterable, chunk_size):
+def chunked(iterable, batch_size):
     """ Return iterable chunks from an iterator.
 
     This sort of works like a grouping in a fixed size.
     """
     while True:
-        chunk = islice(iterable, chunk_size)
+        chunk = islice(iterable, batch_size)
         yield chunk
 
 
@@ -86,11 +99,11 @@ def model_import(options: argparse.Namespace):
     The filename right now needs to be a bzip2-compressed csv-file
     where the first row contains the names of the attributes.
     """
-    model_class = options.entity
+    model_class = _entity_lookup(options.entity)
     print("Importing %s from: %s"
-          % (model_class.__tablename__, options.input_file.name))
+          % (model_class.__tablename__, options.input_file))
 
-    chunk_size = options.chunk_size
+    batch_size = options.batch_size
     decompressor = options.decompressor
     deserializer = options.input_format
 
@@ -111,7 +124,7 @@ def model_import(options: argparse.Namespace):
         with io_wrapper, \
                 progressbar.ProgressBar(max_value=file_size) as progress:
 
-            for chunk in chunked(deserializer(io_wrapper), chunk_size):
+            for chunk in chunked(deserializer(io_wrapper), batch_size):
                 chunk_systems = list(map(dict_transform, chunk))
                 if not chunk_systems:
                     break
